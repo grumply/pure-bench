@@ -19,30 +19,32 @@ import Data.List (intercalate)
 import Control.DeepSeq
 import Control.Exception
 import Data.Monoid
+import Data.Semigroup
 import GHC.Exts
 import GHC.Generics
 import GHC.Stats hiding (gc)
+import qualified GHC.Stats as GHC
 import System.Mem
 
 {-# INLINE mkRuntimeStats #-}
-mkRuntimeStats :: String -> GCStats -> GCStats -> RuntimeStats
+mkRuntimeStats :: String -> RTSStats -> RTSStats -> RuntimeStats
 mkRuntimeStats label before after =
-    let !rs_cpuElapsed  = Seconds (wallSeconds after)        - Seconds (wallSeconds before)
-        !rs_cputime     = Seconds (cpuSeconds after)         - Seconds (cpuSeconds before)
-        !rs_mutElapsed  = Seconds (mutatorWallSeconds after) - Seconds (mutatorWallSeconds before)
-        !rs_mutTime     = Seconds (mutatorCpuSeconds after)  - Seconds (mutatorCpuSeconds before)
-        !rs_allocated   = Bytes (realToFrac $ bytesAllocated after)       - Bytes (realToFrac $ bytesAllocated before) - 152
-        !rs_peak        = Megabytes (realToFrac $ peakMegabytesAllocated after) - Megabytes (realToFrac $ peakMegabytesAllocated before)
-        !rs_used        = Bytes (realToFrac $ currentBytesUsed after)     - Bytes (realToFrac $ currentBytesUsed before) - 152
-        !rs_cumulative  = Bytes (realToFrac $ cumulativeBytesUsed after)  - Bytes (realToFrac $ cumulativeBytesUsed before)
-        !rs_maxBytes    = Bytes (realToFrac $ maxBytesUsed after)         - Bytes (realToFrac $ maxBytesUsed before)
-        !rs_gcElapsed   = Seconds (gcWallSeconds after)      - Seconds (gcWallSeconds before)
-        !rs_gcTime      = Seconds (gcCpuSeconds after)       - Seconds (gcCpuSeconds before)
-        !rs_collections = Count (realToFrac $ numGcs after)               - Count (realToFrac $ numGcs before)
-        !rs_uncollected = Bytes (realToFrac $ currentBytesUsed after)     - Bytes (realToFrac $ currentBytesUsed before)
-        !rs_copied      = Bytes (realToFrac $ bytesCopied after)          - Bytes (realToFrac $ bytesCopied before)
-        !rs_slop        = Bytes (realToFrac $ currentBytesSlop after)     - Bytes (realToFrac $ currentBytesSlop before)
+    let !rs_cpuElapsed  = Nanoseconds (realToFrac $ elapsed_ns after)         - Nanoseconds (realToFrac $ elapsed_ns before)
+        !rs_cputime     = Nanoseconds (realToFrac $ cpu_ns after)             - Nanoseconds (realToFrac $ cpu_ns before)
+        !rs_mutElapsed  = Nanoseconds (realToFrac $ mutator_elapsed_ns after) - Nanoseconds (realToFrac $ mutator_elapsed_ns before)
+        !rs_mutTime     = Nanoseconds (realToFrac $ mutator_cpu_ns after)     - Nanoseconds (realToFrac $ mutator_cpu_ns before)
+        !rs_gcElapsed   = Nanoseconds (realToFrac $ gc_elapsed_ns after)      - Nanoseconds (realToFrac $ gc_elapsed_ns before)
+        !rs_gcTime      = Nanoseconds (realToFrac $ gc_cpu_ns after)          - Nanoseconds (realToFrac $ gc_cpu_ns before)
+        !rs_allocated   = Bytes (realToFrac $ allocated_bytes after)          - Bytes (realToFrac $ allocated_bytes before)  - rtsStats_size
+        !rs_uncollected = Bytes (realToFrac $ max_live_bytes after)           - Bytes (realToFrac $ max_live_bytes before)
+        !rs_copied      = Bytes (realToFrac $ copied_bytes after)             - Bytes (realToFrac $ copied_bytes before)
+        !rs_slop        = Bytes (realToFrac $ gcdetails_slop_bytes gcAfter)   - Bytes (realToFrac $ gcdetails_slop_bytes gcBefore)
+        !rs_collections = Count (realToFrac $ gcs after)                      - Count (realToFrac $ gcs before)
     in RuntimeStats {..}
+  where
+    rtsStats_size = Bytes 320
+    gcBefore = GHC.gc before
+    gcAfter  = GHC.gc after
 
 data RuntimeStats = RuntimeStats
     { rs_cpuElapsed   :: {-# UNPACK #-}!Elapsed
@@ -51,10 +53,6 @@ data RuntimeStats = RuntimeStats
     , rs_mutTime      :: {-# UNPACK #-}!CPUTime
     , rs_allocated    :: {-# UNPACK #-}!Allocated
     -- , mutated      :: {-# UNPACK #-}!Mutated
-    , rs_peak         :: {-# UNPACK #-}!Peak
-    , rs_used         :: {-# UNPACK #-}!Used
-    , rs_cumulative   :: {-# UNPACK #-}!Cumulative
-    , rs_maxBytes     :: {-# UNPACK #-}!Max
     , rs_gcElapsed    :: {-# UNPACK #-}!Elapsed
     , rs_gcTime       :: {-# UNPACK #-}!CPUTime
     , rs_collections  :: {-# UNPACK #-}!Collections
@@ -97,7 +95,11 @@ instance Monoid BenchResult where
   {-# INLINE mempty #-}
   mempty = BenchResult 0 0 0 0 0 0 0 0
   {-# INLINE mappend #-}
-  mappend br1 br2 =
+  mappend = (<>)
+
+instance Semigroup BenchResult where
+  {-# INLINE (<>) #-}
+  (<>) br1 br2 =
     let !brruns  = br_runs br1  + br_runs br2
         !brdur   = br_dur br1   + br_dur br2
         !brcpu   = br_cpu br1   + br_cpu br2
@@ -279,7 +281,7 @@ instance Pretty BenchDiff where
           in replicate (n - l) ' ' <> s
 
 report :: BenchResult -> BenchResult -> Benchmark
-report br1 br2 = notep $ Report (diff br1 br2)
+report br1 br2 = notep $ Report (Pure.Bench.GHC.diff br1 br2)
 
 newtype Report = Report BenchDiff
   deriving (Read,Show,Eq,Generic,ToJSON,FromJSON)
@@ -386,7 +388,7 @@ instance Pretty Report where
 
 
 {-# INLINE mkBenchResult #-}
-mkBenchResult :: SomeCount -> GCStats -> GCStats -> BenchResult
+mkBenchResult :: SomeCount -> RTSStats -> RTSStats -> BenchResult
 mkBenchResult br_runs before after =
   let !rts      = mkRuntimeStats "" before after
       !br_dur   = rs_cputime rts
@@ -435,13 +437,13 @@ nf nm f b = scope nm $ do
           return $ mkBenchResult rs before after
 
     {-# INLINE execute #-}
-    execute :: Int64 -> IO (GCStats,GCStats)
+    execute :: Int64 -> IO (RTSStats,RTSStats)
     execute n = do
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         go n f b
         performGC
-        after <- getGCStats
+        after <- getRTSStats
         return (before,after)
 
       where
@@ -469,13 +471,13 @@ nfio nm f = scope nm $ do
         go br''
 
     {-# INLINE execute #-}
-    execute :: IO (GCStats,GCStats)
+    execute :: IO (RTSStats,RTSStats)
     execute = do
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         a <- f
         a `deepseq` performGC
-        after <- getGCStats
+        after <- getRTSStats
         return (before,after)
 
 {-# INLINE nfwithCleanup #-}
@@ -498,15 +500,15 @@ nfwithCleanup nm alloc act cleanup = scope nm $ do
         go (c + 1) br''
 
     {-# INLINE execute #-}
-    execute :: Int64 -> IO (GCStats,GCStats)
+    execute :: Int64 -> IO (RTSStats,RTSStats)
     execute n = do
         env <- alloc n
         env <- evaluate $ force env
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         a <- act n env
         a `deepseq` performGC
-        after <- getGCStats
+        after <- getRTSStats
         cleanup env
         return (before,after)
 
@@ -530,15 +532,15 @@ nfwith nm alloc act = scope nm $ do
         go (c + 1) br''
 
     {-# INLINE execute #-}
-    execute :: Int64 -> IO (GCStats,GCStats)
+    execute :: Int64 -> IO (RTSStats,RTSStats)
     execute n = do
         env <- alloc n
         env <- evaluate $ force env
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         a <- act n env
         a `deepseq` performGC
-        after <- getGCStats
+        after <- getRTSStats
         return (before,after)
 
 {-# INLINE whnf #-}
@@ -566,13 +568,13 @@ whnf nm f b = scope nm $ do
           return $ mkBenchResult rs before after
 
     {-# INLINE execute #-}
-    execute :: Int64 -> IO (GCStats,GCStats)
+    execute :: Int64 -> IO (RTSStats,RTSStats)
     execute n = do
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         go n f b
         performGC
-        after <- getGCStats
+        after <- getRTSStats
         return (before,after)
 
       where
@@ -600,15 +602,15 @@ whnfwith nm alloc act = scope nm $ do
         go (c + 1) br''
 
     {-# INLINE execute #-}
-    execute :: Int64 -> IO (GCStats,GCStats)
+    execute :: Int64 -> IO (RTSStats,RTSStats)
     execute n = do
         env <- alloc n
         env <- evaluate $ force env
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         a <- act n env
         a `seq` performGC
-        after <- getGCStats
+        after <- getRTSStats
         return (before,after)
 
 {-# INLINE whnfio #-}
@@ -631,13 +633,13 @@ whnfio nm act = scope nm $ do
         go br''
 
     {-# INLINE execute #-}
-    execute :: IO (GCStats,GCStats)
+    execute :: IO (RTSStats,RTSStats)
     execute = do
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         a <- act
         a `seq` performGC
-        after <- getGCStats
+        after <- getRTSStats
         return (before,after)
 
 {-# INLINE whnfwithCleanup #-}
@@ -660,15 +662,15 @@ whnfwithCleanup nm alloc act cleanup = scope nm $ do
         go (c + 1) br''
 
     {-# INLINE execute #-}
-    execute :: Int64 -> IO (GCStats,GCStats)
+    execute :: Int64 -> IO (RTSStats,RTSStats)
     execute n = do
         env <- alloc n
         env <- evaluate $ force env
         performGC
-        before <- getGCStats
+        before <- getRTSStats
         a <- act n env
         a `seq` performGC
-        after <- getGCStats
+        after <- getRTSStats
         cleanup env
         return (before,after)
 
