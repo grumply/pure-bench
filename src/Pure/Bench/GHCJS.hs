@@ -22,6 +22,7 @@ import Control.Concurrent
 import Control.DeepSeq
 import Control.Exception
 import Data.Monoid
+import Data.Semigroup
 import GHC.Generics
 import GHC.Conc
 import qualified System.Mem as GHC
@@ -99,7 +100,11 @@ instance Monoid BenchResult where
   {-# INLINE mempty #-}
   mempty = BenchResult 0 0 0 0 0 0 0 0
   {-# INLINE mappend #-}
-  mappend br1 br2 =
+  mappend = (<>)
+
+instance Semigroup BenchResult where
+  {-# INLINE (<>) #-}
+  (<>) br1 br2 =
     let !brruns  = br_runs br1  + br_runs br2
         !brdur   = br_dur br1   + br_dur br2
         !brcpu   = br_cpu br1   + br_cpu br2
@@ -280,7 +285,7 @@ instance Pretty BenchDiff where
           in replicate (n - l) ' ' <> s
 
 report :: BenchResult -> BenchResult -> Benchmark
-report br1 br2 = notep $ Report (diff br1 br2)
+report br1 br2 = notep $ Report (Pure.Bench.GHCJS.diff br1 br2)
 
 newtype Report = Report BenchDiff
   deriving (Read,Show,Eq,Generic,ToJSON,FromJSON)
