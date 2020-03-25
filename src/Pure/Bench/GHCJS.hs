@@ -6,7 +6,13 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Pure.Bench.GHCJS (module Pure.Bench.GHCJS, module Export) where
+
+import Pure.Bench.Count
+import Pure.Bench.Measure
+import Pure.Bench.Space
+import Pure.Bench.Time
 
 import Pure.Test as Export
 
@@ -31,17 +37,15 @@ import System.IO.Unsafe
 
 import Debug.Trace
 
-chrome_needed f = do
-  unless can_gc $ io $ do
-    install_facade_gc
-    putStrLn chrome_needed_message
+chrome_needed =
+  [ "Benchmarking will only produce useful GC results in Chrome started with:"
+  , "--args --enable-precise-memory-info --enable-memory-info --js-flags=\"--expose-gc\""
+  , "Without Chrome's memory info, only timing results will be available."
+  ]
+
+install_gc f = do
+  unless can_gc $ io $ install_facade_gc
   f
-  where
-    chrome_needed_message =
-      concat [ "Benchmarking will only produce useful GC results in Google Chrome started with "
-             , "`--args --enable-precise-memory-info --enable-memory-info --js-flags=\"--expose-gc\"`.\n"
-             , "Without Chrome's memory statistics, this library will only produce timing results."
-             ]
 
 foreign import javascript unsafe
   "$r = window.performance.memory && 96 || 0" memory_stats_overhead :: Int
@@ -82,7 +86,7 @@ withEnvCleanup :: (NFData env) => String -> Test Sync env -> (env -> Benchmark) 
 withEnvCleanup nm mkenv f c = withEnv nm mkenv (\env -> f env >> c env)
 
 data BenchResult = BenchResult
-  { br_runs :: {-# UNPACK #-}!SomeCount
+  { br_runs :: {-# UNPACK #-}!Count
   , br_dur :: {-# UNPACK #-}!Elapsed
   , br_cpu :: {-# UNPACK #-}!Elapsed
   , br_mut :: {-# UNPACK #-}!Elapsed
@@ -124,7 +128,7 @@ deallocRate :: BenchResult -> DeallocationRate
 deallocRate br = DataRate (dealloc br) (gc br) -- deallocation per GC second
 
 {-# INLINE runs #-}
-runs :: BenchResult -> SomeCount
+runs :: BenchResult -> Count
 runs = br_runs
 
 {-# INLINE dur #-}
@@ -195,12 +199,12 @@ instance Pretty BenchResult where
 data BenchDiff = BenchDiff
   { bd_bench1 :: {-# UNPACK #-}!BenchResult
   , bd_bench2 :: {-# UNPACK #-}!BenchResult
-  , bd_cpu    :: {-# UNPACK #-}!SomeFactor
-  , bd_mut    :: {-# UNPACK #-}!SomeFactor
-  , bd_gc     :: {-# UNPACK #-}!SomeFactor
-  , bd_js_gc  :: {-# UNPACK #-}!SomeFactor
-  , bd_alloc  :: {-# UNPACK #-}!SomeFactor
-  , bd_dealloc :: {-# UNPACK #-}!SomeFactor
+  , bd_cpu    :: {-# UNPACK #-}!Multiplier
+  , bd_mut    :: {-# UNPACK #-}!Multiplier
+  , bd_gc     :: {-# UNPACK #-}!Multiplier
+  , bd_js_gc  :: {-# UNPACK #-}!Multiplier
+  , bd_alloc  :: {-# UNPACK #-}!Multiplier
+  , bd_dealloc :: {-# UNPACK #-}!Multiplier
   } deriving (Read,Show,Eq,Generic,ToJSON,FromJSON)
 
 {-# INLINE diff #-}
@@ -219,7 +223,7 @@ diff br1 br2 = BenchDiff {..}
 
 instance Pretty BenchDiff where
     pretty BenchDiff {..} =
-        unlines
+        unlines $ chrome_needed ++ 
             [ ""
             , divider
             , header2
@@ -240,27 +244,27 @@ instance Pretty BenchDiff where
         cpuTimeStats =
           "CPU:"    <> p bd_cpu
 
-        relativeMutationTime :: SomeFactor
+        relativeMutationTime :: Multiplier
         relativeMutationTime =
-            Factor
+            Multiplier
                 (mkPercent (mut bd_bench2) (cpu bd_bench2))
                 (mkPercent (mut bd_bench1) (cpu bd_bench1))
 
-        relativeGCTime :: SomeFactor
+        relativeGCTime :: Multiplier
         relativeGCTime =
-            Factor
+            Multiplier
                 (mkPercent (gc bd_bench2) (cpu bd_bench2))
                 (mkPercent (gc bd_bench1) (cpu bd_bench1))
 
-        allocRateFactor :: SomeFactor
-        allocRateFactor =
-            Factor
+        allocRateMultiplier :: Multiplier
+        allocRateMultiplier =
+            Multiplier
                 (allocRate bd_bench2)
                 (allocRate bd_bench1)
 
-        deallocRateFactor :: SomeFactor
-        deallocRateFactor =
-            Factor
+        deallocRateMultiplier :: Multiplier
+        deallocRateMultiplier =
+            Multiplier
                 (deallocRate bd_bench2)
                 (deallocRate bd_bench1)
 
@@ -268,13 +272,13 @@ instance Pretty BenchDiff where
           "MUT:"    <> p bd_mut
             <> "  " <> p relativeMutationTime
             <> "  " <> p bd_alloc
-            <> "    " <> p allocRateFactor
+            <> "    " <> p allocRateMultiplier
 
         gcTimeStats =
           "GC: "    <> p bd_gc
             <> "  " <> p relativeGCTime
             <> "  " <> p bd_dealloc
-            <> "    " <> p deallocRateFactor
+            <> "    " <> p deallocRateMultiplier
 
         p :: forall p. Pretty p => p -> String
         p = pad 12 . pretty
@@ -292,7 +296,7 @@ newtype Report = Report BenchDiff
 
 instance Pretty Report where
     pretty (Report (BenchDiff {..})) =
-        unlines
+        unlines $ chrome_needed ++ 
             [ ""
             , divider
             , header2
@@ -351,35 +355,35 @@ instance Pretty Report where
         cpuTimeDiff =
           "Change: "    <> p bd_cpu
 
-        relativeMutationTime :: SomeFactor
+        relativeMutationTime :: Multiplier
         relativeMutationTime =
-          Factor (mkPercent (mut bd_bench2) (cpu bd_bench2))
-                 (mkPercent (mut bd_bench1) (cpu bd_bench1))
+          Multiplier (mkPercent (mut bd_bench2) (cpu bd_bench2))
+                  (mkPercent (mut bd_bench1) (cpu bd_bench1))
 
-        relativeGCTime :: SomeFactor
+        relativeGCTime :: Multiplier
         relativeGCTime =
-          Factor (mkPercent (gc bd_bench2) (cpu bd_bench2))
-                 (mkPercent (gc bd_bench1) (cpu bd_bench1))
+          Multiplier (mkPercent (gc bd_bench2) (cpu bd_bench2))
+                  (mkPercent (gc bd_bench1) (cpu bd_bench1))
 
-        allocRateFactor :: SomeFactor
-        allocRateFactor =
-          Factor (allocRate bd_bench2) (allocRate bd_bench1)
+        allocRateMultiplier :: Multiplier
+        allocRateMultiplier =
+          Multiplier (allocRate bd_bench2) (allocRate bd_bench1)
 
-        deallocRateFactor :: SomeFactor
-        deallocRateFactor =
-          Factor (deallocRate bd_bench2) (deallocRate bd_bench1)
+        deallocRateMultiplier :: Multiplier
+        deallocRateMultiplier =
+          Multiplier (deallocRate bd_bench2) (deallocRate bd_bench1)
 
         mutTimeDiff =
           "Change: "  <> p bd_mut
             <> "  "   <> p relativeMutationTime
             <> "  "   <> p bd_alloc
-            <> "  " <> p allocRateFactor
+            <> "  " <> p allocRateMultiplier
 
         gcTimeDiff =
           "Change: "  <> p bd_gc
             <> "  "   <> p relativeGCTime
             <> "  "   <> p bd_dealloc
-            <> "  " <> p deallocRateFactor
+            <> "  "   <> p deallocRateMultiplier
 
         p :: forall p. Pretty p => p -> String
         p = pad 12 . pretty
@@ -388,6 +392,22 @@ instance Pretty Report where
         pad n s =
           let l = length s
           in replicate (n - l) ' ' <> s
+
+summary :: BenchResult -> Benchmark
+summary br = do
+  s <- currentScope
+  notep (Summary s br)
+
+data Summary = Summary String BenchResult
+
+instance Pretty Summary where
+  pretty (Summary s br) = 
+    s <> pad (max 0 (60 - length s)) (pretty (cpu br))
+    where
+      pad :: Int -> String -> String
+      pad n s =
+        let l = length s
+        in replicate (n - l) ' ' <> s
 
 mkBenchResult :: Int64 -> JSV -> JSV -> JSV -> Elapsed -> Elapsed -> Elapsed -> Elapsed -> BenchResult
 mkBenchResult n start_stats mid_stats end_stats start_time end_mut_time end_gc_time end_time =
@@ -414,15 +434,8 @@ removeOverhead overhead br =
     (br_dealloc br)
 
 {-# INLINE nf #-}
-nf :: (NFData a) => String -> (b -> a) -> b -> Test Sync BenchResult
-nf nm f b = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ do
-      let rs = 1
-      br <- execute (round rs)
-      run br
-    complete
-    return br
+nf :: (NFData a) => (b -> a) -> b -> Test Sync BenchResult
+nf f b = install_gc $ io (execute 1 >>= run)
   where
     {-# INLINE run #-}
     run :: BenchResult -> IO BenchResult
@@ -478,12 +491,8 @@ nf nm f b = chrome_needed $ scope nm $ do
         go n f b = f b `deepseq` go (n - 1) f b
 
 {-# INLINE nfio #-}
-nfio :: (NFData a) => String -> IO a -> Test Sync BenchResult
-nfio nm f = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ go mempty
-    complete
-    return br
+nfio :: (NFData a) => IO a -> Test Sync BenchResult
+nfio f = install_gc $ io (go mempty)
   where
     {-# INLINE go #-}
     go :: BenchResult -> IO BenchResult
@@ -533,12 +542,8 @@ nfio nm f = chrome_needed $ scope nm $ do
 
 
 {-# INLINE nfwithCleanup #-}
-nfwithCleanup :: (NFData env, NFData a) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
-nfwithCleanup nm alloc act cleanup = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+nfwithCleanup :: (NFData env, NFData a) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
+nfwithCleanup alloc act cleanup = install_gc $ io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult
@@ -593,12 +598,8 @@ nfwithCleanup nm alloc act cleanup = chrome_needed $ scope nm $ do
         return $ mkBenchResult 1 start_stats mid_stats end_stats start_time end_mut_time end_gc_time end_time
 
 {-# INLINE nfwith #-}
-nfwith :: (NFData env, NFData a) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
-nfwith nm alloc act = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+nfwith :: (NFData env, NFData a) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
+nfwith alloc act = install_gc $ io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult
@@ -651,15 +652,8 @@ nfwith nm alloc act = chrome_needed $ scope nm $ do
         return $ mkBenchResult 1 start_stats mid_stats end_stats start_time end_mut_time end_gc_time end_time
 
 {-# INLINE whnf #-}
-whnf :: String -> (b -> a) -> b -> Test Sync BenchResult
-whnf nm f b = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ do
-      let rs = 1
-      br <- execute (round rs)
-      run br
-    complete
-    return br
+whnf :: (b -> a) -> b -> Test Sync BenchResult
+whnf f b = install_gc $ io (execute 1 >>= run)
   where
     {-# INLINE run #-}
     run :: BenchResult -> IO BenchResult
@@ -715,12 +709,8 @@ whnf nm f b = chrome_needed $ scope nm $ do
         go n f b = f b `seq` go (n - 1) f b
 
 {-# INLINE whnfwith #-}
-whnfwith :: (NFData env) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
-whnfwith nm alloc act = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+whnfwith :: (NFData env) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
+whnfwith alloc act = install_gc $ io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult
@@ -773,12 +763,8 @@ whnfwith nm alloc act = chrome_needed $ scope nm $ do
         return $ mkBenchResult 1 start_stats mid_stats end_stats start_time end_mut_time end_gc_time end_time
 
 {-# INLINE whnfio #-}
-whnfio :: String -> IO a -> Test Sync BenchResult
-whnfio nm act = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ go mempty
-    complete
-    return br
+whnfio :: IO a -> Test Sync BenchResult
+whnfio act = install_gc $ io (go mempty)
   where
     {-# INLINE go #-}
     go :: BenchResult -> IO BenchResult
@@ -827,12 +813,8 @@ whnfio nm act = chrome_needed $ scope nm $ do
         return $ mkBenchResult 1 start_stats mid_stats end_stats start_time end_mut_time end_gc_time end_time
 
 {-# INLINE whnfwithCleanup #-}
-whnfwithCleanup :: (NFData env) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
-whnfwithCleanup nm alloc act cleanup = chrome_needed $ scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+whnfwithCleanup :: (NFData env) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
+whnfwithCleanup alloc act cleanup = install_gc $ io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult

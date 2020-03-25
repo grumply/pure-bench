@@ -25,6 +25,10 @@ library
    
   exposed-modules:
     Pure.Bench
+    Pure.Bench.Count
+    Pure.Bench.Measure
+    Pure.Bench.Space
+    Pure.Bench.Time
 
   if (impl(ghcjs))
     exposed-modules: 

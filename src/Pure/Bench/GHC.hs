@@ -6,7 +6,13 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Pure.Bench.GHC (module Pure.Bench.GHC, module Export) where
+
+import Pure.Bench.Count
+import Pure.Bench.Measure
+import Pure.Bench.Space
+import Pure.Bench.Time
 
 import Pure.Test as Export
 import Pure.Spacetime
@@ -27,8 +33,8 @@ import qualified GHC.Stats as GHC
 import System.Mem
 
 {-# INLINE mkRuntimeStats #-}
-mkRuntimeStats :: String -> RTSStats -> RTSStats -> RuntimeStats
-mkRuntimeStats label before after =
+mkRuntimeStats :: RTSStats -> RTSStats -> RuntimeStats
+mkRuntimeStats before after =
     let !rs_cpuElapsed  = Nanoseconds (realToFrac $ elapsed_ns after)         - Nanoseconds (realToFrac $ elapsed_ns before)
         !rs_cputime     = Nanoseconds (realToFrac $ cpu_ns after)             - Nanoseconds (realToFrac $ cpu_ns before)
         !rs_mutElapsed  = Nanoseconds (realToFrac $ mutator_elapsed_ns after) - Nanoseconds (realToFrac $ mutator_elapsed_ns before)
@@ -67,17 +73,17 @@ instance Magnitude RuntimeStats
 
 type Benchmark = Test Sync ()
 
-withEnv :: (NFData env) => String -> Test Sync env -> (env -> Benchmark) -> Benchmark
-withEnv nm mkenv f = do
+withEnv :: (NFData env) => Test Sync env -> (env -> Benchmark) -> Benchmark
+withEnv mkenv f = do
   e <- mkenv
   io $ evaluate $ rnf e
   f e
 
-withEnvCleanup :: (NFData env) => String -> Test Sync env -> (env -> Benchmark) -> (env -> Benchmark) -> Benchmark
-withEnvCleanup nm mkenv f c = withEnv nm mkenv (\env -> f env >> c env)
+withEnvCleanup :: (NFData env) => Test Sync env -> (env -> Benchmark) -> (env -> Benchmark) -> Benchmark
+withEnvCleanup mkenv f c = withEnv mkenv (\env -> f env >> c env)
 
 data BenchResult = BenchResult
-  { br_runs :: {-# UNPACK #-}!SomeCount
+  { br_runs :: {-# UNPACK #-}!Count
   , br_dur :: {-# UNPACK #-}!CPUTime
   , br_cpu :: {-# UNPACK #-}!CPUTime
   , br_mut :: {-# UNPACK #-}!CPUTime
@@ -119,7 +125,7 @@ copyRate :: BenchResult -> CopyRate
 copyRate br = DataRate (copy br) (gc br)
 
 {-# INLINE runs #-}
-runs :: BenchResult -> SomeCount
+runs :: BenchResult -> Count
 runs = br_runs
 
 {-# INLINE dur #-}
@@ -195,12 +201,12 @@ instance Pretty BenchResult where
 data BenchDiff = BenchDiff
   { bd_bench1 :: {-# UNPACK #-}!BenchResult
   , bd_bench2 :: {-# UNPACK #-}!BenchResult
-  , bd_cpu    :: {-# UNPACK #-}!SomeFactor
-  , bd_mut    :: {-# UNPACK #-}!SomeFactor
-  , bd_gc     :: {-# UNPACK #-}!SomeFactor
-  , bd_alloc  :: {-# UNPACK #-}!SomeFactor
-  , bd_copy   :: {-# UNPACK #-}!SomeFactor
-  , bd_coll   :: {-# UNPACK #-}!SomeFactor
+  , bd_cpu    :: {-# UNPACK #-}!Multiplier
+  , bd_mut    :: {-# UNPACK #-}!Multiplier
+  , bd_gc     :: {-# UNPACK #-}!Multiplier
+  , bd_alloc  :: {-# UNPACK #-}!Multiplier
+  , bd_copy   :: {-# UNPACK #-}!Multiplier
+  , bd_coll   :: {-# UNPACK #-}!Multiplier
   } deriving (Read,Show,Eq,Generic,ToJSON,FromJSON)
 
 {-# INLINE diff #-}
@@ -236,27 +242,27 @@ instance Pretty BenchDiff where
         cpuTimeStats =
           "CPU:"    <> p bd_cpu
 
-        relativeMutationTime :: SomeFactor
+        relativeMutationTime :: Multiplier
         relativeMutationTime =
-            Factor
+            Multiplier
                 (mkPercent (mut bd_bench2) (cpu bd_bench2))
                 (mkPercent (mut bd_bench1) (cpu bd_bench1))
 
-        relativeGCTime :: SomeFactor
+        relativeGCTime :: Multiplier
         relativeGCTime =
-            Factor
+            Multiplier
                 (mkPercent (gc bd_bench2) (cpu bd_bench2))
                 (mkPercent (gc bd_bench1) (cpu bd_bench1))
 
-        allocRateFactor :: SomeFactor
-        allocRateFactor =
-            Factor
+        allocRateMultiplier :: Multiplier
+        allocRateMultiplier =
+            Multiplier
                 (allocRate bd_bench2)
                 (allocRate bd_bench1)
 
-        copyRateFactor :: SomeFactor
-        copyRateFactor =
-            Factor
+        copyRateMultiplier :: Multiplier
+        copyRateMultiplier =
+            Multiplier
                 (copyRate bd_bench2)
                 (copyRate bd_bench1)
 
@@ -264,13 +270,13 @@ instance Pretty BenchDiff where
           "MUT:"    <> p bd_mut
             <> "  " <> p relativeMutationTime
             <> "  " <> p bd_alloc
-            <> "    " <> p allocRateFactor
+            <> "    " <> p allocRateMultiplier
 
         gcTimeStats =
           "GC: "    <> p bd_gc
             <> "  " <> p relativeGCTime
             <> "  " <> p bd_copy
-            <> "    " <> p copyRateFactor
+            <> "    " <> p copyRateMultiplier
 
         p :: forall p. Pretty p => p -> String
         p = pad 12 . pretty
@@ -307,7 +313,7 @@ instance Pretty Report where
             , ""
             , "Old Collections:" <> pad 11 (pretty (coll bd_bench1))
             , "New Collections:" <> pad 11 (pretty (coll bd_bench2))
-            , "Change:         " <> pad 11 (pretty (Factor (coll bd_bench1) (coll bd_bench2) :: SomeFactor))
+            , "Change:         " <> pad 11 (pretty (Multiplier (coll bd_bench1) (coll bd_bench2) :: Multiplier))
             ]
       where
         oldCpuTimeStats =
@@ -347,35 +353,35 @@ instance Pretty Report where
         cpuTimeDiff =
           "Change: "    <> p bd_cpu
 
-        relativeMutationTime :: SomeFactor
+        relativeMutationTime :: Multiplier
         relativeMutationTime =
-          Factor (mkPercent (mut bd_bench2) (cpu bd_bench2))
+          Multiplier (mkPercent (mut bd_bench2) (cpu bd_bench2))
                  (mkPercent (mut bd_bench1) (cpu bd_bench1))
 
-        relativeGCTime :: SomeFactor
+        relativeGCTime :: Multiplier
         relativeGCTime =
-          Factor (mkPercent (gc bd_bench2) (cpu bd_bench2))
+          Multiplier (mkPercent (gc bd_bench2) (cpu bd_bench2))
                  (mkPercent (gc bd_bench1) (cpu bd_bench1))
 
-        allocRateFactor :: SomeFactor
-        allocRateFactor =
-          Factor (allocRate bd_bench2) (allocRate bd_bench1)
+        allocRateMultiplier :: Multiplier
+        allocRateMultiplier =
+          Multiplier (allocRate bd_bench2) (allocRate bd_bench1)
 
-        copyRateFactor :: SomeFactor
-        copyRateFactor =
-          Factor (copyRate bd_bench2) (copyRate bd_bench1)
+        copyRateMultiplier :: Multiplier
+        copyRateMultiplier =
+          Multiplier (copyRate bd_bench2) (copyRate bd_bench1)
 
         mutTimeDiff =
           "Change: "  <> p bd_mut
             <> "  "   <> p relativeMutationTime
             <> "  "   <> p bd_alloc
-            <> "  " <> p allocRateFactor
+            <> "  " <> p allocRateMultiplier
 
         gcTimeDiff =
           "Change: "  <> p bd_gc
             <> "  "   <> p relativeGCTime
             <> "  "   <> p bd_copy
-            <> "  " <> p copyRateFactor
+            <> "  " <> p copyRateMultiplier
 
         p :: forall p. Pretty p => p -> String
         p = pad 12 . pretty
@@ -385,12 +391,26 @@ instance Pretty Report where
           let l = length s
           in replicate (n - l) ' ' <> s
 
+summary :: BenchResult -> Benchmark
+summary br = do
+  s <- currentScope
+  notep (Summary s br)
 
+data Summary = Summary String BenchResult
+
+instance Pretty Summary where
+  pretty (Summary s br) = 
+    s <> pad (max 0 (60 - length s)) (pretty (cpu br))
+    where
+      pad :: Int -> String -> String
+      pad n s =
+        let l = length s
+        in replicate (n - l) ' ' <> s
 
 {-# INLINE mkBenchResult #-}
-mkBenchResult :: SomeCount -> RTSStats -> RTSStats -> BenchResult
+mkBenchResult :: Count -> RTSStats -> RTSStats -> BenchResult
 mkBenchResult br_runs before after =
-  let !rts      = mkRuntimeStats "" before after
+  let !rts      = mkRuntimeStats before after
       !br_dur   = rs_cputime rts
       !br_cpu   = rs_cputime rts
       !br_mut   = rs_mutTime rts
@@ -413,15 +433,10 @@ removeOverhead overhead br =
     (br_coll br)
 
 {-# INLINE nf #-}
-nf :: (NFData a) => String -> (b -> a) -> b -> Test Sync BenchResult
-nf nm f b = scope nm $ do
-    noteScoped "running..."
-    br <- io $ do
-      let rs = 1
-      (before,after) <- execute (round rs)
-      run (mkBenchResult rs before after)
-    complete
-    return br
+nf :: (NFData a) => (b -> a) -> b -> Test Sync BenchResult
+nf f b = io $ do
+    (before,after) <- execute 1
+    run (mkBenchResult 1 before after)
   where
     {-# INLINE run #-}
     run :: BenchResult -> IO BenchResult
@@ -452,12 +467,8 @@ nf nm f b = scope nm $ do
         go n f b = f b `deepseq` go (n - 1) f b
 
 {-# INLINE nfio #-}
-nfio :: (NFData a) => String -> IO a -> Test Sync BenchResult
-nfio nm f = scope nm $ do
-    noteScoped "running..."
-    br <- io $ go mempty
-    complete
-    return br
+nfio :: (NFData a) => IO a -> Test Sync BenchResult
+nfio f = io (go mempty) 
   where
     {-# INLINE go #-}
     go :: BenchResult -> IO BenchResult
@@ -481,12 +492,8 @@ nfio nm f = scope nm $ do
         return (before,after)
 
 {-# INLINE nfwithCleanup #-}
-nfwithCleanup :: (NFData env, NFData a) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
-nfwithCleanup nm alloc act cleanup = scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+nfwithCleanup :: (NFData env, NFData a) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
+nfwithCleanup alloc act cleanup = io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult
@@ -513,12 +520,8 @@ nfwithCleanup nm alloc act cleanup = scope nm $ do
         return (before,after)
 
 {-# INLINE nfwith #-}
-nfwith :: (NFData env, NFData a) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
-nfwith nm alloc act = scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+nfwith :: (NFData env, NFData a) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
+nfwith alloc act = io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult
@@ -544,15 +547,10 @@ nfwith nm alloc act = scope nm $ do
         return (before,after)
 
 {-# INLINE whnf #-}
-whnf :: String -> (b -> a) -> b -> Test Sync BenchResult
-whnf nm f b = scope nm $ do
-    noteScoped "running..."
-    br <- io $ do
-      let rs = 1
-      (before,after) <- execute (round rs)
-      run (mkBenchResult rs before after)
-    complete
-    return br
+whnf :: (b -> a) -> b -> Test Sync BenchResult
+whnf f b = io $ do
+    (before,after) <- execute 1
+    run (mkBenchResult 1 before after)
   where
     {-# INLINE run #-}
     run :: BenchResult -> IO BenchResult
@@ -583,12 +581,8 @@ whnf nm f b = scope nm $ do
         go n f b = f b `seq` go (n - 1) f b
 
 {-# INLINE whnfwith #-}
-whnfwith :: (NFData env) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
-whnfwith nm alloc act = scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+whnfwith :: (NFData env) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
+whnfwith alloc act = io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult
@@ -614,12 +608,8 @@ whnfwith nm alloc act = scope nm $ do
         return (before,after)
 
 {-# INLINE whnfio #-}
-whnfio :: String -> IO a -> Test Sync BenchResult
-whnfio nm act = scope nm $ do
-    noteScoped "running..."
-    br <- io $ go mempty
-    complete
-    return br
+whnfio :: IO a -> Test Sync BenchResult
+whnfio act = io (go mempty)
   where
     {-# INLINE go #-}
     go :: BenchResult -> IO BenchResult
@@ -643,12 +633,8 @@ whnfio nm act = scope nm $ do
         return (before,after)
 
 {-# INLINE whnfwithCleanup #-}
-whnfwithCleanup :: (NFData env) => String -> (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
-whnfwithCleanup nm alloc act cleanup = scope nm $ do
-    noteScoped "running..."
-    br <- io $ go 1 mempty
-    complete
-    return br
+whnfwithCleanup :: (NFData env) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
+whnfwithCleanup alloc act cleanup = io (go 1 mempty)
   where
     {-# INLINE go #-}
     go :: Int64 -> BenchResult -> IO BenchResult
