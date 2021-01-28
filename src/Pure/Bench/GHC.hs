@@ -31,6 +31,7 @@ import GHC.Generics
 import GHC.Stats hiding (gc)
 import qualified GHC.Stats as GHC
 import System.Mem
+import System.IO.Unsafe
 
 {-# INLINE mkRuntimeStats #-}
 mkRuntimeStats :: RTSStats -> RTSStats -> RuntimeStats
@@ -468,83 +469,7 @@ nf f b = io $ do
 
 {-# INLINE nfio #-}
 nfio :: (NFData a) => IO a -> Test Sync BenchResult
-nfio f = io (go mempty) 
-  where
-    {-# INLINE go #-}
-    go :: BenchResult -> IO BenchResult
-    go br = do
-      (before,after) <- execute
-      let !br' = mkBenchResult (Count 1) before after
-          !br'' = br <> br'
-      if dur br'' > Seconds 5 then
-        return br''
-      else
-        go br''
-
-    {-# INLINE execute #-}
-    execute :: IO (RTSStats,RTSStats)
-    execute = do
-        performGC
-        before <- getRTSStats
-        a <- f
-        a `deepseq` performGC
-        after <- getRTSStats
-        return (before,after)
-
-{-# INLINE nfwithCleanup #-}
-nfwithCleanup :: (NFData env, NFData a) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
-nfwithCleanup alloc act cleanup = io (go 1 mempty)
-  where
-    {-# INLINE go #-}
-    go :: Int64 -> BenchResult -> IO BenchResult
-    go !c br = do
-      (before,after) <- execute c
-      let !br' = mkBenchResult (Count 1) before after
-          !br'' = br <> br'
-      if dur br'' > Seconds 5 then
-        return br''
-      else
-        go (c + 1) br''
-
-    {-# INLINE execute #-}
-    execute :: Int64 -> IO (RTSStats,RTSStats)
-    execute n = do
-        env <- alloc n
-        env <- evaluate $ force env
-        performGC
-        before <- getRTSStats
-        a <- act n env
-        a `deepseq` performGC
-        after <- getRTSStats
-        cleanup env
-        return (before,after)
-
-{-# INLINE nfwith #-}
-nfwith :: (NFData env, NFData a) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
-nfwith alloc act = io (go 1 mempty)
-  where
-    {-# INLINE go #-}
-    go :: Int64 -> BenchResult -> IO BenchResult
-    go !c br = do
-      (before,after) <- execute c
-      let !br' = mkBenchResult (Count 1) before after
-          !br'' = br <> br'
-      if dur br'' > Seconds 5 then
-        return br''
-      else
-        go (c + 1) br''
-
-    {-# INLINE execute #-}
-    execute :: Int64 -> IO (RTSStats,RTSStats)
-    execute n = do
-        env <- alloc n
-        env <- evaluate $ force env
-        performGC
-        before <- getRTSStats
-        a <- act n env
-        a `deepseq` performGC
-        after <- getRTSStats
-        return (before,after)
+nfio = nf unsafePerformIO 
 
 {-# INLINE whnf #-}
 whnf :: (b -> a) -> b -> Test Sync BenchResult
@@ -580,85 +505,9 @@ whnf f b = io $ do
         go 0 f b = return ()
         go n f b = f b `seq` go (n - 1) f b
 
-{-# INLINE whnfwith #-}
-whnfwith :: (NFData env) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> Test Sync BenchResult
-whnfwith alloc act = io (go 1 mempty)
-  where
-    {-# INLINE go #-}
-    go :: Int64 -> BenchResult -> IO BenchResult
-    go c br = do
-      (before,after) <- execute c
-      let !br' = mkBenchResult (Count 1) before after
-          !br'' = br <> br'
-      if dur br'' > Seconds 5 then
-        return br''
-      else
-        go (c + 1) br''
-
-    {-# INLINE execute #-}
-    execute :: Int64 -> IO (RTSStats,RTSStats)
-    execute n = do
-        env <- alloc n
-        env <- evaluate $ force env
-        performGC
-        before <- getRTSStats
-        a <- act n env
-        a `seq` performGC
-        after <- getRTSStats
-        return (before,after)
-
 {-# INLINE whnfio #-}
 whnfio :: IO a -> Test Sync BenchResult
-whnfio act = io (go mempty)
-  where
-    {-# INLINE go #-}
-    go :: BenchResult -> IO BenchResult
-    go br = do
-      (before,after) <- execute
-      let !br' = mkBenchResult (Count 1) before after
-          !br'' = br <> br'
-      if dur br'' > Seconds 5 then
-        return br''
-      else
-        go br''
-
-    {-# INLINE execute #-}
-    execute :: IO (RTSStats,RTSStats)
-    execute = do
-        performGC
-        before <- getRTSStats
-        a <- act
-        a `seq` performGC
-        after <- getRTSStats
-        return (before,after)
-
-{-# INLINE whnfwithCleanup #-}
-whnfwithCleanup :: (NFData env) => (Int64 -> IO env) -> (Int64 -> env -> IO a) -> (env -> IO b) -> Test Sync BenchResult
-whnfwithCleanup alloc act cleanup = io (go 1 mempty)
-  where
-    {-# INLINE go #-}
-    go :: Int64 -> BenchResult -> IO BenchResult
-    go c br = do
-      (before,after) <- execute c
-      let !br' = mkBenchResult (Count 1) before after
-          !br'' = br <> br'
-      if dur br'' > Seconds 5 then
-        return br''
-      else
-        go (c + 1) br''
-
-    {-# INLINE execute #-}
-    execute :: Int64 -> IO (RTSStats,RTSStats)
-    execute n = do
-        env <- alloc n
-        env <- evaluate $ force env
-        performGC
-        before <- getRTSStats
-        a <- act n env
-        a `seq` performGC
-        after <- getRTSStats
-        cleanup env
-        return (before,after)
+whnfio = whnf unsafePerformIO 
 
 type BenchPred a = a -> BenchResult -> BenchResult -> Bool
 
